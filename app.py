@@ -434,3 +434,11 @@ def health_odoo():
         return {"ok": True, "uid": uid}
     except Exception as e:
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    
+@app.get("/debug/odoo/fields/{model}")
+def debug_odoo_fields(model: str):
+    uid = odoo_login()
+    # listet ALLE Felder mit Typ, String-Label, Help etc.
+    fields = odoo_execute(uid, model, "fields_get", args=[], kwargs={"attributes": ["string", "type", "help", "relation", "required"]})
+    return fields
+
