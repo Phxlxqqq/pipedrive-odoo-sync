@@ -148,26 +148,6 @@ def odoo_execute(uid: int, model: str, method: str, args=None, kwargs=None):
         },
         "id": 1
     })
-####LÖSCHEN
-def odoo_fields_get(uid: int, model: str):
-    return odoo_execute(
-        uid,
-        model,
-        "fields_get",
-        args=[],
-        kwargs={"attributes": ["string", "type", "help", "relation", "required"]}
-    )
-
-
-@app.get("/debug/odoo/fields/{model}")
-def debug_odoo_fields(model: str, token: str):
-    # Simple protection (reuse webhook token)
-    if token != WEBHOOK_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    uid = odoo_login()
-    return odoo_fields_get(uid, model)
-###LÖSCHEN
 
 def odoo_search(uid: int, model: str, domain, limit=1):
     return odoo_execute(uid, model, "search", args=[domain], kwargs={"limit": limit})
