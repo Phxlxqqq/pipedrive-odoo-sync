@@ -278,6 +278,42 @@ def pd_val(field):
         return field["value"]
     return field
 
+def pd_owner_id(obj: dict):
+    """
+    Pipedrive owner is usually in obj["owner_id"] for persons/orgs,
+    and in obj["user_id"] for deals (already handled separately in your code).
+    Returns int or None.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    owner = obj.get("owner_id")
+    if isinstance(owner, dict):
+        return owner.get("id")
+    if isinstance(owner, int):
+        return owner
+
+    # fallback (some entities may have user_id style)
+    owner = obj.get("user_id")
+    if isinstance(owner, dict):
+        return owner.get("id")
+    if isinstance(owner, int):
+        return owner
+
+    return None
+
+
+def owner_allowed(owner_id: int | None) -> bool:
+    """
+    If GERMANY_USER_IDS is empty -> allow all.
+    Otherwise allow only if owner_id in set.
+    """
+    if not GERMANY_USER_IDS:
+        return True
+    if owner_id is None:
+        return False
+    return int(owner_id) in GERMANY_USER_IDS
+
 
 # ---------------- Delete handling ----------------
 def archive_deal_in_odoo(uid: int, pipedrive_deal_id: int) -> bool:
@@ -295,6 +331,12 @@ def archive_deal_in_odoo(uid: int, pipedrive_deal_id: int) -> bool:
 # ---------------- UPSERTS ----------------
 def upsert_org(uid: int, org_id: int) -> int:
     org = pd_get(f"/organizations/{org_id}")
+        # ---- Owner / Germany filter (same logic as deals) ----
+    org_owner_id = pd_owner_id(org)
+    if not owner_allowed(org_owner_id):
+        print(f"SKIP org {org_id}: owner {org_owner_id} not in Germany team")
+        return -1
+
     name = org.get("name") or f"Org {org_id}"
 
     mapped = mapping_get("org", org_id)
@@ -328,6 +370,12 @@ def upsert_org(uid: int, org_id: int) -> int:
 
 def upsert_person(uid: int, person_id: int) -> int:
     p = pd_get(f"/persons/{person_id}")
+        # ---- Owner / Germany filter (same logic as deals) ----
+    person_owner_id = pd_owner_id(p)
+    if not owner_allowed(person_owner_id):
+        print(f"SKIP person {person_id}: owner {person_owner_id} not in Germany team")
+        return -1
+
     name = p.get("name") or f"Person {person_id}"
 
     org_id = pd_val(p.get("org_id"))
