@@ -36,7 +36,7 @@ STAGE_MAP = {
     25: 3,
     26: 5,
     27: 5,
-    28: 6,
+    28: 7,
 }
 
 # Deal status mapping (status = open/won/lost/deleted)
