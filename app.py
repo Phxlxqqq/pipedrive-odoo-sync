@@ -39,10 +39,12 @@ ICP_JOB_TITLES = [t.strip() for t in os.getenv(
 ).split(",")]
 
 # ---- Pipeline Allowlist + Odoo Team Mapping ----
-# Only deals in these Pipedrive pipelines will be synced.
+# Only deals in these Pipedrive pipelines will be synced to Odoo.
 # Value maps pipedrive pipeline_id -> odoo crm.team id (team_id).
+# Note: Surfe triggers work independently of this map (based on stage_id only)
 PIPELINE_MAP = {
-    4: 1,
+    4: 1,   # Original pipeline -> Odoo Team 1
+    6: 1,   # Surfe/Leadfeeder pipeline -> Odoo Team 1 (adjust team_id if needed)
 }
 
 # ---- Stage mapping ----
