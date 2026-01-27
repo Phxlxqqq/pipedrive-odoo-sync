@@ -22,6 +22,22 @@ GERMANY_USER_IDS = set(
     int(x.strip()) for x in os.getenv("GERMANY_USER_IDS", "").split(",") if x.strip()
 )
 
+# ---- Surfe API Configuration ----
+SURFE_API_KEY = os.getenv("SURFE_API_KEY")
+SURFE_WEBHOOK_URL = os.getenv("SURFE_WEBHOOK_URL")
+SURFE_WEBHOOK_TOKEN = os.getenv("SURFE_WEBHOOK_TOKEN")
+SURFE_BASE = "https://api.surfe.com/v2"
+
+# Stage IDs for Surfe triggers
+DOWNLOAD_STAGE_ID = int(os.getenv("SURFE_DOWNLOAD_STAGE_ID", "37"))
+LEADFEEDER_STAGE_ID = int(os.getenv("SURFE_LEADFEEDER_STAGE_ID", "68"))
+
+# ICP Job Titles for Leadfeeder search (priority order)
+ICP_JOB_TITLES = [t.strip() for t in os.getenv(
+    "ICP_JOB_TITLES",
+    "CISO,Chief Information Security Officer,Compliance Manager,IT Manager,IT Director,CTO,Chief Technology Officer,CEO,Chief Executive Officer,Founder,Geschäftsführer"
+).split(",")]
+
 # ---- Pipeline Allowlist + Odoo Team Mapping ----
 # Only deals in these Pipedrive pipelines will be synced.
 # Value maps pipedrive pipeline_id -> odoo crm.team id (team_id).
@@ -129,6 +145,16 @@ def get_con():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS surfe_enrichments (
+            enrichment_id TEXT PRIMARY KEY,
+            pipedrive_deal_id INTEGER NOT NULL,
+            pipedrive_person_id INTEGER,
+            enrichment_type TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     return con
 
 
@@ -162,6 +188,132 @@ def event_seen(event_key: str) -> bool:
         return True
     finally:
         con.close()
+
+
+# ---------------- Surfe Enrichment Tracking ----------------
+def save_enrichment(enrichment_id: str, deal_id: int, person_id: int = None, enrichment_type: str = "download"):
+    """Save enrichment request for later matching when webhook callback arrives."""
+    con = get_con()
+    con.execute("""
+        INSERT OR REPLACE INTO surfe_enrichments
+        (enrichment_id, pipedrive_deal_id, pipedrive_person_id, enrichment_type)
+        VALUES (?, ?, ?, ?)
+    """, (enrichment_id, deal_id, person_id, enrichment_type))
+    con.commit()
+    con.close()
+
+
+def get_enrichment(enrichment_id: str) -> dict | None:
+    """Get enrichment data by Surfe enrichment ID."""
+    con = get_con()
+    row = con.execute("""
+        SELECT enrichment_id, pipedrive_deal_id, pipedrive_person_id,
+               enrichment_type, status
+        FROM surfe_enrichments WHERE enrichment_id = ?
+    """, (enrichment_id,)).fetchone()
+    con.close()
+
+    if row:
+        return {
+            "enrichment_id": row[0],
+            "deal_id": row[1],
+            "person_id": row[2],
+            "type": row[3],
+            "status": row[4]
+        }
+    return None
+
+
+def complete_enrichment(enrichment_id: str):
+    """Mark enrichment as completed."""
+    con = get_con()
+    con.execute("""
+        UPDATE surfe_enrichments
+        SET status = 'completed'
+        WHERE enrichment_id = ?
+    """, (enrichment_id,))
+    con.commit()
+    con.close()
+
+
+# ---------------- SURFE API ----------------
+def surfe_headers():
+    """Return authentication headers for Surfe API."""
+    return {
+        "Authorization": f"Bearer {SURFE_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+
+def surfe_enrich_person(first_name: str = None, last_name: str = None,
+                        company_domain: str = None, company_name: str = None,
+                        email: str = None, linkedin_url: str = None) -> dict:
+    """
+    Start async Surfe person enrichment.
+    Returns dict with enrichmentID for tracking.
+    """
+    person = {}
+    if first_name:
+        person["firstName"] = first_name
+    if last_name:
+        person["lastName"] = last_name
+    if company_domain:
+        person["companyDomain"] = company_domain
+    if company_name:
+        person["companyName"] = company_name
+    if email:
+        person["email"] = email
+    if linkedin_url:
+        person["linkedinUrl"] = linkedin_url
+
+    payload = {
+        "include": {
+            "email": True,
+            "mobile": True,
+            "jobHistory": False,
+            "linkedInUrl": True
+        },
+        "people": [person],
+        "notificationOptions": {
+            "webhookUrl": SURFE_WEBHOOK_URL
+        }
+    }
+
+    r = requests.post(
+        f"{SURFE_BASE}/people/enrich",
+        headers=surfe_headers(),
+        json=payload,
+        timeout=30
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def surfe_search_people(domain: str, job_titles: list, limit: int = 10) -> list:
+    """
+    Synchronously search for people at a company by domain and job titles.
+    Returns list of people found.
+    """
+    payload = {
+        "companies": {
+            "domains": [domain]
+        },
+        "people": {
+            "jobTitles": job_titles
+        },
+        "limit": limit,
+        "peoplePerCompany": limit
+    }
+
+    r = requests.post(
+        f"{SURFE_BASE}/people/search",
+        headers=surfe_headers(),
+        json=payload,
+        timeout=30
+    )
+    r.raise_for_status()
+    result = r.json()
+    return result.get("people", [])
 
 
 # ---------------- ODOO JSON-RPC ----------------
@@ -313,6 +465,78 @@ def owner_allowed(owner_id: int | None) -> bool:
     if owner_id is None:
         return False
     return int(owner_id) in GERMANY_USER_IDS
+
+
+def pd_post(path: str, data: dict):
+    """POST request to Pipedrive API."""
+    r = requests.post(
+        f"{PIPEDRIVE_BASE}{path}",
+        params={"api_token": PIPEDRIVE_TOKEN},
+        json=data,
+        timeout=30
+    )
+    r.raise_for_status()
+    js = r.json()
+    if not js.get("success"):
+        raise RuntimeError(js)
+    return js["data"]
+
+
+def pd_put(path: str, data: dict):
+    """PUT request to Pipedrive API."""
+    r = requests.put(
+        f"{PIPEDRIVE_BASE}{path}",
+        params={"api_token": PIPEDRIVE_TOKEN},
+        json=data,
+        timeout=30
+    )
+    r.raise_for_status()
+    js = r.json()
+    if not js.get("success"):
+        raise RuntimeError(js)
+    return js["data"]
+
+
+def pd_create_person(name: str, org_id: int = None, email: str = None,
+                     phone: str = None, owner_id: int = None,
+                     job_title: str = None) -> dict:
+    """Create a new person in Pipedrive."""
+    data = {"name": name}
+
+    if org_id:
+        data["org_id"] = org_id
+    if email:
+        data["email"] = [{"value": email, "primary": True, "label": "work"}]
+    if phone:
+        data["phone"] = [{"value": phone, "primary": True, "label": "mobile"}]
+    if owner_id:
+        data["owner_id"] = owner_id
+    if job_title:
+        data["job_title"] = job_title
+
+    return pd_post("/persons", data)
+
+
+def pd_update_person(person_id: int, email: str = None,
+                     phone: str = None, job_title: str = None) -> dict | None:
+    """Update an existing person in Pipedrive."""
+    data = {}
+
+    if email:
+        data["email"] = [{"value": email, "primary": True, "label": "work"}]
+    if phone:
+        data["phone"] = [{"value": phone, "primary": True, "label": "mobile"}]
+    if job_title:
+        data["job_title"] = job_title
+
+    if data:
+        return pd_put(f"/persons/{person_id}", data)
+    return None
+
+
+def pd_link_person_to_deal(deal_id: int, person_id: int) -> dict:
+    """Link a person to a deal in Pipedrive."""
+    return pd_put(f"/deals/{deal_id}", {"person_id": person_id})
 
 
 # ---------------- Delete handling ----------------
@@ -516,6 +740,220 @@ def upsert_deal(uid: int, deal_id: int) -> int:
     return odoo_id
 
 
+# ---------------- SURFE STAGE HANDLERS ----------------
+def extract_domain_from_website(website: str) -> str | None:
+    """Extract clean domain from website URL."""
+    if not website:
+        return None
+    domain = website.strip()
+    domain = domain.replace("https://", "").replace("http://", "")
+    domain = domain.split("/")[0]
+    domain = domain.replace("www.", "")
+    return domain if domain else None
+
+
+def select_best_icp_person(people: list) -> dict | None:
+    """
+    Select the best person based on ICP priority.
+    Priority: CISO > Compliance Manager > IT Manager > CTO > CEO > Founder
+    """
+    priority_keywords = [
+        ("ciso", "information security"),
+        ("compliance",),
+        ("it manager", "it director", "it leiter"),
+        ("cto", "chief technology"),
+        ("ceo", "chief executive", "geschäftsführer"),
+        ("founder", "gründer", "owner", "inhaber"),
+    ]
+
+    for keywords in priority_keywords:
+        for person in people:
+            job_title = (person.get("jobTitle") or "").lower()
+            seniorities = [s.lower() for s in person.get("seniorities", [])]
+
+            for keyword in keywords:
+                if keyword in job_title or keyword in " ".join(seniorities):
+                    return person
+
+    # Fallback: First person with C-Level/VP seniority
+    for person in people:
+        seniorities = [s.lower() for s in person.get("seniorities", [])]
+        if any(s in ["c-level", "vp", "director"] for s in seniorities):
+            return person
+
+    # Last fallback: First person
+    return people[0] if people else None
+
+
+def handle_download_stage(deal: dict, uid: int):
+    """
+    Scenario 1: Deal created in Download stage (37)
+    - Person has email but missing phone number
+    - Start Surfe enrichment to get phone, name, company
+    """
+    deal_id = deal.get("id")
+    person_id = pd_val(deal.get("person_id"))
+
+    if not person_id:
+        print(f"DOWNLOAD: Deal {deal_id} has no person, skip")
+        return
+
+    person = pd_get(f"/persons/{person_id}")
+
+    # Extract email
+    email = None
+    if isinstance(person.get("email"), list) and person["email"]:
+        email = person["email"][0].get("value")
+
+    if not email:
+        print(f"DOWNLOAD: Person {person_id} has no email, skip")
+        return
+
+    # Check if phone is missing
+    phone = None
+    if isinstance(person.get("phone"), list) and person["phone"]:
+        phone = person["phone"][0].get("value")
+
+    if phone and len(phone) > 5:
+        print(f"DOWNLOAD: Person {person_id} already has phone, skip")
+        return
+
+    # Split name
+    name = person.get("name", "")
+    name_parts = name.split(" ", 1)
+    first_name = name_parts[0] if name_parts else ""
+    last_name = name_parts[1] if len(name_parts) > 1 else ""
+
+    # Get company domain from org
+    org_id = pd_val(person.get("org_id"))
+    company_domain = None
+    company_name = None
+    if org_id:
+        org = pd_get(f"/organizations/{org_id}")
+        website = org.get("address") or org.get("cc_email")
+        if not website:
+            website = org.get("website")
+        company_domain = extract_domain_from_website(website)
+        company_name = org.get("name")
+
+    # Start Surfe enrichment
+    try:
+        result = surfe_enrich_person(
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            company_domain=company_domain,
+            company_name=company_name
+        )
+        enrichment_id = result.get("enrichmentID")
+        if enrichment_id:
+            save_enrichment(enrichment_id, deal_id, person_id, "download")
+            print(f"DOWNLOAD: Surfe enrichment started: {enrichment_id} for person {person_id}")
+        else:
+            print(f"DOWNLOAD: No enrichment ID returned from Surfe")
+    except Exception as e:
+        print(f"DOWNLOAD: Surfe enrichment failed: {e}")
+
+
+def handle_leadfeeder_stage(deal: dict, uid: int):
+    """
+    Scenario 2: Deal created in Leadfeeder stage (68)
+    - Organization known (from Leadfeeder), no person yet
+    - Search for ICP person via Surfe and add to deal
+    """
+    deal_id = deal.get("id")
+    org_id = pd_val(deal.get("org_id"))
+
+    if not org_id:
+        print(f"LEADFEEDER: Deal {deal_id} has no organization, skip")
+        return
+
+    # If deal already has person, skip
+    person_id = pd_val(deal.get("person_id"))
+    if person_id:
+        print(f"LEADFEEDER: Deal {deal_id} already has person, skip")
+        return
+
+    org = pd_get(f"/organizations/{org_id}")
+
+    # Extract domain from website field
+    website = org.get("website")
+    domain = extract_domain_from_website(website)
+
+    if not domain:
+        print(f"LEADFEEDER: Org {org_id} has no website/domain, skip")
+        return
+
+    # Get deal owner for new person
+    pd_owner = deal.get("user_id")
+    owner_id = pd_owner.get("id") if isinstance(pd_owner, dict) else pd_owner
+
+    # Surfe search for ICP persons
+    try:
+        people = surfe_search_people(
+            domain=domain,
+            job_titles=ICP_JOB_TITLES,
+            limit=10
+        )
+
+        if not people:
+            print(f"LEADFEEDER: No people found at {domain}")
+            return
+
+        # Select best person by ICP priority
+        best_person = select_best_icp_person(people)
+
+        if not best_person:
+            print(f"LEADFEEDER: No matching ICP person found")
+            return
+
+        full_name = f"{best_person.get('firstName', '')} {best_person.get('lastName', '')}".strip()
+        job_title = best_person.get("jobTitle")
+
+        print(f"LEADFEEDER: Found best ICP person: {full_name} ({job_title}) at {domain}")
+
+        # Create person in Pipedrive
+        new_person = pd_create_person(
+            name=full_name,
+            org_id=org_id,
+            owner_id=owner_id,
+            job_title=job_title
+        )
+
+        new_person_id = new_person.get("id")
+
+        # Link person to deal
+        pd_link_person_to_deal(deal_id, new_person_id)
+
+        print(f"LEADFEEDER: Created person {new_person_id} ({full_name}) and linked to deal {deal_id}")
+
+        # Start Surfe enrichment for email/phone
+        linkedin_url = best_person.get("linkedInUrl")
+        if linkedin_url or domain:
+            try:
+                result = surfe_enrich_person(
+                    first_name=best_person.get("firstName"),
+                    last_name=best_person.get("lastName"),
+                    linkedin_url=linkedin_url,
+                    company_domain=domain
+                )
+                enrichment_id = result.get("enrichmentID")
+                if enrichment_id:
+                    save_enrichment(enrichment_id, deal_id, new_person_id, "leadfeeder")
+                    print(f"LEADFEEDER: Surfe enrichment started: {enrichment_id}")
+            except Exception as e:
+                print(f"LEADFEEDER: Surfe enrichment failed: {e}")
+
+        # Sync to Odoo
+        try:
+            upsert_person(uid, new_person_id)
+        except Exception as e:
+            print(f"LEADFEEDER: Odoo sync failed: {e}")
+
+    except Exception as e:
+        print(f"LEADFEEDER: Error: {e}")
+
+
 # ---------------- WEBHOOK ----------------
 @app.post("/webhooks/pipedrive")
 async def pipedrive_webhook(req: Request):
@@ -556,9 +994,118 @@ async def pipedrive_webhook(req: Request):
     elif entity == "person" or (event and event.startswith("person.")):
         upsert_person(uid, int(obj_id))
     elif entity == "deal" or (event and event.startswith("deal.")):
-        upsert_deal(uid, int(obj_id))
+        deal_id = int(obj_id)
+
+        # Surfe stage triggers on deal creation only
+        if action == "create":
+            try:
+                deal = pd_get(f"/deals/{deal_id}")
+                stage_id = deal.get("stage_id")
+
+                if stage_id == DOWNLOAD_STAGE_ID:
+                    print(f"SURFE TRIGGER: Download stage {DOWNLOAD_STAGE_ID} detected for deal {deal_id}")
+                    handle_download_stage(deal, uid)
+                elif stage_id == LEADFEEDER_STAGE_ID:
+                    print(f"SURFE TRIGGER: Leadfeeder stage {LEADFEEDER_STAGE_ID} detected for deal {deal_id}")
+                    handle_leadfeeder_stage(deal, uid)
+            except Exception as e:
+                print(f"SURFE TRIGGER: Error handling stage trigger: {e}")
+
+        upsert_deal(uid, deal_id)
     else:
         return {"ok": True, "ignored": True}
+
+    return {"ok": True}
+
+
+@app.post("/webhooks/surfe")
+async def surfe_webhook(req: Request):
+    """
+    Receive Surfe enrichment results via webhook callback.
+    Updates Pipedrive person with enriched data (phone, email, job title).
+    """
+    # Token validation
+    if req.query_params.get("token") != SURFE_WEBHOOK_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = await req.json()
+    event_type = payload.get("eventType")
+
+    print(f"SURFE WEBHOOK: Received event {event_type}")
+
+    if event_type != "person.enrichment.completed":
+        return {"ok": True, "ignored": True}
+
+    data = payload.get("data", {})
+    enrichment_id = data.get("enrichmentID")
+
+    # Handle bulk enrichment response - results are in 'people' array
+    people_results = data.get("people", [])
+    if not people_results:
+        print(f"SURFE: No people in enrichment result {enrichment_id}")
+        return {"ok": True, "no_results": True}
+
+    person_data = people_results[0] if people_results else {}
+
+    # Load enrichment tracking
+    enrichment = get_enrichment(enrichment_id)
+    if not enrichment:
+        print(f"SURFE: Unknown enrichment {enrichment_id}")
+        return {"ok": True, "unknown": True}
+
+    deal_id = enrichment["deal_id"]
+    person_id = enrichment["person_id"]
+    enrichment_type = enrichment["type"]
+
+    print(f"SURFE: Processing enrichment {enrichment_id} for deal {deal_id}, person {person_id}, type {enrichment_type}")
+
+    # Extract email
+    emails = person_data.get("emails", [])
+    email = None
+    for e in emails:
+        if e.get("validationStatus") == "VALID":
+            email = e.get("email")
+            break
+    if not email and emails:
+        email = emails[0].get("email")
+
+    # Extract phone (highest confidence)
+    mobiles = person_data.get("mobilePhones", [])
+    phone = None
+    if mobiles:
+        mobiles_sorted = sorted(mobiles, key=lambda x: x.get("confidence", 0), reverse=True)
+        phone = mobiles_sorted[0].get("phone")
+
+    job_title = person_data.get("jobTitle")
+
+    print(f"SURFE: Enriched data - email: {email}, phone: {phone}, job_title: {job_title}")
+
+    # Update Pipedrive person
+    if person_id:
+        try:
+            # For download type, we already have email - only update phone/job_title
+            update_email = email if enrichment_type != "download" else None
+            pd_update_person(
+                person_id=person_id,
+                email=update_email,
+                phone=phone,
+                job_title=job_title
+            )
+            print(f"SURFE: Updated Pipedrive person {person_id}")
+        except Exception as e:
+            print(f"SURFE: Pipedrive update failed: {e}")
+
+    # Sync to Odoo
+    try:
+        uid = odoo_login()
+        if person_id:
+            upsert_person(uid, person_id)
+            print(f"SURFE: Synced person {person_id} to Odoo")
+    except Exception as e:
+        print(f"SURFE: Odoo sync failed: {e}")
+
+    # Mark enrichment as completed
+    complete_enrichment(enrichment_id)
 
     return {"ok": True}
 
