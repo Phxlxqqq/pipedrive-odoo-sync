@@ -1194,10 +1194,12 @@ async def surfe_webhook(req: Request):
     if req.query_params.get("token") != SURFE_WEBHOOK_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    import json as _json
     payload = await req.json()
     event_type = payload.get("eventType")
 
     print(f"SURFE WEBHOOK: Received event {event_type}")
+    print(f"SURFE WEBHOOK FULL PAYLOAD: {_json.dumps(payload, indent=2, default=str)}")
 
     if event_type != "person.enrichment.completed":
         return {"ok": True, "ignored": True}
@@ -1205,13 +1207,18 @@ async def surfe_webhook(req: Request):
     data = payload.get("data", {})
     enrichment_id = data.get("enrichmentID")
 
-    # Handle bulk enrichment response - results are in 'people' array
-    people_results = data.get("people", [])
-    if not people_results:
-        print(f"SURFE: No people in enrichment result {enrichment_id}")
-        return {"ok": True, "no_results": True}
+    # Surfe webhook payload: data.person contains the enriched person object
+    person_data = data.get("person")
+    if not person_data:
+        # Fallback: check if person data is in data.people[] (older format)
+        people_results = data.get("people", [])
+        if people_results:
+            person_data = people_results[0]
 
-    person_data = people_results[0] if people_results else {}
+    if not person_data:
+        print(f"SURFE: No person data in enrichment result {enrichment_id}")
+        print(f"SURFE: Available data keys: {list(data.keys())}")
+        return {"ok": True, "no_results": True}
 
     # Load enrichment tracking
     enrichment = get_enrichment(enrichment_id)
@@ -1237,11 +1244,12 @@ async def surfe_webhook(req: Request):
         email = emails[0].get("email")
 
     # Extract phone (highest confidence)
+    # Surfe format: mobilePhones array with objects containing "mobilePhone" and "confidenceScore"
     mobiles = person_data.get("mobilePhones", [])
     phone = None
     if mobiles:
-        mobiles_sorted = sorted(mobiles, key=lambda x: x.get("confidence", 0), reverse=True)
-        phone = mobiles_sorted[0].get("phone")
+        mobiles_sorted = sorted(mobiles, key=lambda x: x.get("confidenceScore", 0), reverse=True)
+        phone = mobiles_sorted[0].get("mobilePhone")
 
     job_title = person_data.get("jobTitle")
 

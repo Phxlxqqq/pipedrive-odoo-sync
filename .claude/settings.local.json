@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:developers.surfe.com)"
+      "WebFetch(domain:developers.surfe.com)",
+      "WebFetch(domain:docs.surfe.com)"
     ]
   }
 }
