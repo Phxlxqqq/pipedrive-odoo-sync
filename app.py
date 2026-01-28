@@ -338,7 +338,7 @@ def surfe_search_people(domain: str = None, company_name: str = None, job_titles
     Args:
         domain: Company domain (e.g. "example.com"). Either domain or company_name must be provided.
         company_name: Company name (e.g. "Acme Corp"). Used when domain is not available.
-        job_titles: List of job titles to filter by
+        job_titles: List of job titles to filter by. If None, returns all people at the company.
         limit: Maximum number of results
     """
     if not domain and not company_name:
@@ -357,7 +357,7 @@ def surfe_search_people(domain: str = None, company_name: str = None, job_titles
         "peoplePerCompany": limit
     }
     
-    # Add job titles filter if provided
+    # Add job titles filter if provided (optional)
     if job_titles:
         payload["people"] = {
             "jobTitles": job_titles
@@ -1288,6 +1288,7 @@ def handle_leadfeeder_stage(deal: dict):
 
     # Surfe search for ICP persons (use domain if available, otherwise company name)
     try:
+        # First try: Search with ICP job title filters
         people = surfe_search_people(
             domain=domain,
             company_name=org_name if not domain else None,
@@ -1295,10 +1296,24 @@ def handle_leadfeeder_stage(deal: dict):
             limit=10
         )
 
+        # Fallback: If no ICP persons found, search WITHOUT job title filter
         if not people:
-            print(f"SURFE SEARCH: No people found for {search_by}")
-            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}' (search criteria: {', '.join(ICP_JOB_TITLES[:5])}...).")
-            return
+            print(f"SURFE SEARCH: No ICP persons found, trying without job title filter...")
+            people = surfe_search_people(
+                domain=domain,
+                company_name=org_name if not domain else None,
+                job_titles=None,  # No filter - get all people
+                limit=10
+            )
+            
+            if not people:
+                print(f"SURFE SEARCH: No people found at all for {search_by}")
+                pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}'.")
+                return
+            else:
+                print(f"SURFE SEARCH: Found {len(people)} people without job title filter")
+        else:
+            print(f"SURFE SEARCH: Found {len(people)} ICP people with job title filter")
 
         # Select best person by ICP priority (filter by company name to avoid wrong matches)
         best_person = select_best_icp_person(people, target_company=org_name)
