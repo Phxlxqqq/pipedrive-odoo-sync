@@ -1313,6 +1313,17 @@ async def surfe_webhook(req: Request):
 
 
 # ---------------- HEALTH ----------------
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "pipedrive-odoo-sync"}
+
+
+@app.get("/webhooks/surfe")
+def surfe_webhook_test():
+    """Test endpoint to verify webhook URL is reachable."""
+    return {"status": "ok", "message": "Surfe webhook endpoint is reachable"}
+
+
 @app.get("/health/odoo")
 def health_odoo():
     try:
