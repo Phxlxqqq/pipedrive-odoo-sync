@@ -822,6 +822,71 @@ def extract_domain_from_email(email: str) -> str | None:
     return email.split("@")[1].lower()
 
 
+def guess_company_domain(company_name: str) -> str | None:
+    """
+    Try to guess a company's domain from its name by testing common TLD patterns.
+    Returns the first working domain found, or None if none work.
+    """
+    import re
+    import socket
+
+    if not company_name:
+        return None
+
+    # Clean company name: "Leitner + Leitner GmbH" → "leitner-leitner"
+    clean = company_name.lower().strip()
+
+    # Remove common legal suffixes
+    suffixes = [" gmbh", " ag", " kg", " ohg", " gbr", " se", " co. kg", " & co.",
+                " inc", " inc.", " ltd", " ltd.", " llc", " corp", " corporation",
+                " ug", " e.v.", " e.k."]
+    for suffix in suffixes:
+        clean = clean.replace(suffix, "")
+
+    # Replace special characters
+    clean = clean.replace(" + ", "-").replace(" & ", "-").replace("&", "-")
+    clean = clean.replace(" - ", "-").replace("–", "-").replace("—", "-")
+
+    # Replace spaces and other chars with hyphens, remove non-alphanumeric except hyphen
+    clean = re.sub(r'[^a-z0-9-]', '-', clean)
+    clean = re.sub(r'-+', '-', clean)  # Multiple hyphens to single
+    clean = clean.strip('-')
+
+    if not clean:
+        return None
+
+    # Also try without hyphens (e.g., "leitnerleitner")
+    clean_no_hyphen = clean.replace("-", "")
+
+    # TLDs to try, prioritized for DACH region
+    tlds = [".de", ".at", ".ch", ".com", ".eu", ".io"]
+
+    # Domain variations to try
+    variations = [clean]
+    if clean != clean_no_hyphen:
+        variations.append(clean_no_hyphen)
+
+    def domain_exists(domain: str) -> bool:
+        """Quick check if domain has DNS records."""
+        try:
+            socket.gethostbyname(domain)
+            return True
+        except socket.gaierror:
+            return False
+
+    # Try each variation with each TLD
+    for variation in variations:
+        for tld in tlds:
+            domain = f"{variation}{tld}"
+            print(f"DOMAIN GUESS: Trying {domain}...")
+            if domain_exists(domain):
+                print(f"DOMAIN GUESS: Found working domain: {domain}")
+                return domain
+
+    print(f"DOMAIN GUESS: No working domain found for '{company_name}'")
+    return None
+
+
 def company_name_matches(person: dict, target_company: str) -> bool:
     """
     Check if person's current company matches the target company.
@@ -991,7 +1056,7 @@ def handle_leadfeeder_stage(deal: dict):
 
     if not org_id:
         print(f"LEADFEEDER: Deal {deal_id} has no organization, skip")
-        pd_add_note_to_deal(deal_id, "⚠️ Surfe: Kein Unternehmen im Deal vorhanden - keine Kontaktsuche möglich.")
+        pd_add_note_to_deal(deal_id, "⚠️ Surfe: No organization in deal - contact search not possible.")
         return
 
     # If deal already has person, skip
@@ -1005,12 +1070,19 @@ def handle_leadfeeder_stage(deal: dict):
 
     if not org_name:
         print(f"LEADFEEDER: Org {org_id} has no name, skip")
-        pd_add_note_to_deal(deal_id, "⚠️ Surfe: Unternehmen hat keinen Namen - keine Kontaktsuche möglich.")
+        pd_add_note_to_deal(deal_id, "⚠️ Surfe: Organization has no name - contact search not possible.")
         return
 
     # Try to extract domain from website field if available
     website = org.get("website")
     domain = extract_domain_from_website(website)
+
+    # If no domain from website, try to guess it from company name
+    if not domain:
+        print(f"LEADFEEDER: No website found, trying to guess domain from company name '{org_name}'")
+        domain = guess_company_domain(org_name)
+        if domain:
+            print(f"LEADFEEDER: Guessed domain: {domain}")
 
     # Determine search method
     if domain:
@@ -1035,7 +1107,7 @@ def handle_leadfeeder_stage(deal: dict):
 
         if not people:
             print(f"LEADFEEDER: No people found for {search_by}")
-            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Keine Kontakte bei '{org_name}' gefunden (Suchkriterien: {', '.join(ICP_JOB_TITLES[:5])}...).")
+            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}' (search criteria: {', '.join(ICP_JOB_TITLES[:5])}...).")
             return
 
         # Select best person by ICP priority (filter by company name to avoid wrong matches)
@@ -1043,7 +1115,7 @@ def handle_leadfeeder_stage(deal: dict):
 
         if not best_person:
             print(f"LEADFEEDER: No matching ICP person found at {org_name}")
-            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Kontakte gefunden, aber keiner arbeitet bei '{org_name}'. Bitte manuell prüfen.")
+            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contacts found, but none work at '{org_name}'. Please check manually.")
             return
 
         full_name = f"{best_person.get('firstName', '')} {best_person.get('lastName', '')}".strip()
@@ -1081,17 +1153,17 @@ def handle_leadfeeder_stage(deal: dict):
                     print(f"LEADFEEDER: Surfe enrichment started: {enrichment_id} - waiting for email before creating person")
                 else:
                     print(f"LEADFEEDER: No enrichment ID returned from Surfe")
-                    pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Kontakt gefunden ({full_name}, {job_title}), aber Anreicherung fehlgeschlagen.")
+                    pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}, {job_title}), but enrichment failed.")
             except Exception as e:
                 print(f"LEADFEEDER: Surfe enrichment failed: {e}")
-                pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Kontakt gefunden ({full_name}, {job_title}), aber Anreicherung fehlgeschlagen: {e}")
+                pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}, {job_title}), but enrichment failed: {e}")
         else:
             print(f"LEADFEEDER: No identifiers for enrichment (no LinkedIn, domain, or company name)")
-            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Kontakt gefunden ({full_name}), aber keine Daten für E-Mail-Anreicherung vorhanden.")
+            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}), but no data available for email enrichment.")
 
     except Exception as e:
         print(f"LEADFEEDER: Error: {e}")
-        pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Fehler bei der Kontaktsuche: {e}")
+        pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Error during contact search: {e}")
 
 
 # ---------------- WEBHOOK ----------------
@@ -1262,8 +1334,8 @@ async def surfe_webhook(req: Request):
             print(f"SURFE: No email found for leadfeeder enrichment, skipping person creation")
             pd_add_note_to_deal(
                 deal_id,
-                f"⚠️ Surfe: Kontakt gefunden ({pending_person_data.get('name')}, {pending_person_data.get('job_title')}), "
-                f"aber keine E-Mail-Adresse ermittelt. Bitte manuell recherchieren."
+                f"⚠️ Surfe: Contact found ({pending_person_data.get('name')}, {pending_person_data.get('job_title')}), "
+                f"but no email address found. Please research manually."
             )
             complete_enrichment(enrichment_id)
             return {"ok": True, "no_email": True}
@@ -1288,16 +1360,16 @@ async def surfe_webhook(req: Request):
             # Add success note
             pd_add_note_to_deal(
                 deal_id,
-                f"✅ Surfe: Kontakt automatisch hinzugefügt:\n"
+                f"✅ Surfe: Contact automatically added:\n"
                 f"• Name: {pending_person_data.get('name')}\n"
                 f"• Position: {job_title or pending_person_data.get('job_title')}\n"
-                f"• E-Mail: {email}\n"
-                f"• Telefon: {phone or 'nicht gefunden'}"
+                f"• Email: {email}\n"
+                f"• Phone: {phone or 'not found'}"
             )
 
         except Exception as e:
             print(f"SURFE: Failed to create person: {e}")
-            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Fehler beim Erstellen des Kontakts: {e}")
+            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Error creating contact: {e}")
 
     # Handle download type: Update existing person
     elif person_id:
