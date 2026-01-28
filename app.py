@@ -284,12 +284,16 @@ def surfe_enrich_person(first_name: str = None, last_name: str = None,
         }
     }
 
+    print(f"SURFE ENRICH REQUEST: {payload}")
+
     r = requests.post(
         f"{SURFE_BASE}/people/enrich",
         headers=surfe_headers(),
         json=payload,
         timeout=30
     )
+    if not r.ok:
+        print(f"SURFE ENRICH ERROR: {r.status_code} - {r.text}")
     r.raise_for_status()
     return r.json()
 
@@ -332,6 +336,8 @@ def surfe_search_people(domain: str = None, company_name: str = None, job_titles
         json=payload,
         timeout=30
     )
+    if not r.ok:
+        print(f"SURFE SEARCH ERROR: {r.status_code} - {r.text}")
     r.raise_for_status()
     result = r.json()
     return result.get("people", [])
