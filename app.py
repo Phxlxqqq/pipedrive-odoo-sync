@@ -1319,7 +1319,7 @@ def handle_leadfeeder_stage(deal: dict):
             limit=10
         )
 
-        # Fallback: If no ICP persons found, search WITHOUT job title filter
+        # Fallback 1: If no ICP persons found, search WITHOUT job title filter
         if not people:
             print(f"SURFE SEARCH: No ICP persons found, trying without job title filter...")
             people = surfe_search_people(
@@ -1328,15 +1328,33 @@ def handle_leadfeeder_stage(deal: dict):
                 job_titles=None,  # No filter - get all people
                 limit=10
             )
-            
+
+        # Fallback 2: If domain search returned nothing, try with company NAME instead
+        if not people and domain:
+            print(f"SURFE SEARCH: No people found by domain, trying by company name '{org_name}'...")
+            people = surfe_search_people(
+                domain=None,
+                company_name=org_name,
+                job_titles=ICP_JOB_TITLES,
+                limit=10
+            )
             if not people:
-                print(f"SURFE SEARCH: No people found at all for {search_by}")
-                pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}'.")
-                return
-            else:
-                print(f"SURFE SEARCH: Found {len(people)} people without job title filter")
+                # Try without job title filter
+                people = surfe_search_people(
+                    domain=None,
+                    company_name=org_name,
+                    job_titles=None,
+                    limit=10
+                )
+
+        if not people:
+            print(f"SURFE SEARCH: No people found at all for {search_by} (also tried company name)")
+            pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}' (searched by domain and company name).")
+            return
         else:
-            print(f"SURFE SEARCH: Found {len(people)} ICP people with job title filter")
+            print(f"SURFE SEARCH: Found {len(people)} people")
+
+        # Note: Original success logging removed as it's now consolidated above
 
         # Select best person by ICP priority (filter by company name to avoid wrong matches)
         best_person = select_best_icp_person(people, target_company=org_name)
