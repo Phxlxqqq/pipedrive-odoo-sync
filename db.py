@@ -35,6 +35,14 @@ def get_con():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS surfe_processed_deals (
+            deal_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(deal_id, action_type)
+        )
+    """)
     return con
 
 
@@ -133,3 +141,45 @@ def complete_enrichment(enrichment_id: str):
     """, (enrichment_id,))
     con.commit()
     con.close()
+
+
+# ---- Surfe Deal Processing (Deduplication) ----
+def surfe_deal_already_processed(deal_id: int, action_type: str) -> bool:
+    """Check if a deal was already processed for a Surfe action.
+
+    action_type: 'download' or 'leadfeeder'
+    Returns True if already processed (skip), False if not yet processed.
+    """
+    con = get_con()
+    row = con.execute(
+        "SELECT 1 FROM surfe_processed_deals WHERE deal_id = ? AND action_type = ?",
+        (deal_id, action_type)
+    ).fetchone()
+    con.close()
+    return row is not None
+
+
+def mark_surfe_deal_processed(deal_id: int, action_type: str):
+    """Mark a deal as processed for a Surfe action.
+
+    action_type: 'download' or 'leadfeeder'
+    """
+    con = get_con()
+    try:
+        con.execute(
+            "INSERT OR IGNORE INTO surfe_processed_deals(deal_id, action_type) VALUES(?, ?)",
+            (deal_id, action_type)
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def clear_surfe_processed_deals():
+    """Clear all processed deal records (called on startup)."""
+    con = get_con()
+    con.execute("DELETE FROM surfe_processed_deals")
+    con.commit()
+    deleted = con.total_changes
+    con.close()
+    return deleted

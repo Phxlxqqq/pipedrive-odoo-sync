@@ -6,7 +6,7 @@ import requests
 from config import (
     SURFE_API_KEY, SURFE_BASE, SURFE_WEBHOOK_URL, ICP_JOB_TITLES
 )
-from db import save_enrichment
+from db import save_enrichment, surfe_deal_already_processed, mark_surfe_deal_processed
 from helpers import (
     extract_domain_from_website, extract_domain_from_email,
     extract_region_from_title, guess_company_domain, search_company_domain,
@@ -127,6 +127,12 @@ def handle_download_stage(deal: dict):
     - Start Surfe enrichment to get phone
     """
     deal_id = deal.get("id")
+
+    # Deduplication: Check if this deal was already processed
+    if surfe_deal_already_processed(deal_id, "download"):
+        print(f"DOWNLOAD: Deal {deal_id} already processed for download, skip")
+        return
+
     person_id = pd_val(deal.get("person_id"))
 
     if not person_id:
@@ -186,6 +192,7 @@ def handle_download_stage(deal: dict):
         enrichment_id = result.get("enrichmentID")
         if enrichment_id:
             save_enrichment(enrichment_id, deal_id, person_id, "download")
+            mark_surfe_deal_processed(deal_id, "download")
             print(f"DOWNLOAD: Surfe enrichment started: {enrichment_id} for person {person_id}")
         else:
             print(f"DOWNLOAD: No enrichment ID returned from Surfe")
@@ -200,17 +207,25 @@ def handle_leadfeeder_stage(deal: dict):
     - Search for ICP person via Surfe API and add to deal
     """
     deal_id = deal.get("id")
+
+    # Deduplication: Check if this deal was already processed
+    if surfe_deal_already_processed(deal_id, "leadfeeder"):
+        print(f"SURFE SEARCH: Deal {deal_id} already processed for leadfeeder, skip")
+        return
+
     deal_title = deal.get("title", "")
     org_id = pd_val(deal.get("org_id"))
 
     if not org_id:
         print(f"SURFE SEARCH: Deal {deal_id} has no organization, skip")
         pd_add_note_to_deal(deal_id, "⚠️ Surfe: No organization in deal - contact search not possible.")
+        mark_surfe_deal_processed(deal_id, "leadfeeder")
         return
 
     person_id = pd_val(deal.get("person_id"))
     if person_id:
         print(f"SURFE SEARCH: Deal {deal_id} already has person, skip")
+        mark_surfe_deal_processed(deal_id, "leadfeeder")
         return
 
     org = pd_get(f"/organizations/{org_id}")
@@ -219,6 +234,7 @@ def handle_leadfeeder_stage(deal: dict):
     if not org_name:
         print(f"SURFE SEARCH: Org {org_id} has no name, skip")
         pd_add_note_to_deal(deal_id, "⚠️ Surfe: Organization has no name - contact search not possible.")
+        mark_surfe_deal_processed(deal_id, "leadfeeder")
         return
 
     region = extract_region_from_title(deal_title)
@@ -279,6 +295,7 @@ def handle_leadfeeder_stage(deal: dict):
         if not people:
             print(f"SURFE SEARCH: No people found at all for {search_by}")
             pd_add_note_to_deal(deal_id, f"⚠️ Surfe: No contacts found at '{org_name}' (searched by domain and company name).")
+            mark_surfe_deal_processed(deal_id, "leadfeeder")
             return
         else:
             print(f"SURFE SEARCH: Found {len(people)} people")
@@ -288,6 +305,7 @@ def handle_leadfeeder_stage(deal: dict):
         if not best_person:
             print(f"SURFE SEARCH: No matching ICP person found at {org_name}")
             pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contacts found, but none work at '{org_name}'. Please check manually.")
+            mark_surfe_deal_processed(deal_id, "leadfeeder")
             return
 
         full_name = f"{best_person.get('firstName', '')} {best_person.get('lastName', '')}".strip()
@@ -318,17 +336,22 @@ def handle_leadfeeder_stage(deal: dict):
                 enrichment_id = result.get("enrichmentID")
                 if enrichment_id:
                     save_enrichment(enrichment_id, deal_id, None, "leadfeeder", pending_person_data)
+                    mark_surfe_deal_processed(deal_id, "leadfeeder")
                     print(f"SURFE SEARCH: Surfe enrichment started: {enrichment_id} - waiting for email before creating person")
                 else:
                     print(f"SURFE SEARCH: No enrichment ID returned from Surfe")
                     pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}, {job_title}), but enrichment failed.")
+                    mark_surfe_deal_processed(deal_id, "leadfeeder")
             except Exception as e:
                 print(f"SURFE SEARCH: Surfe enrichment failed: {e}")
                 pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}, {job_title}), but enrichment failed: {e}")
+                mark_surfe_deal_processed(deal_id, "leadfeeder")
         else:
             print(f"SURFE SEARCH: No identifiers for enrichment (no LinkedIn, domain, or company name)")
             pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Contact found ({full_name}), but no data available for email enrichment.")
+            mark_surfe_deal_processed(deal_id, "leadfeeder")
 
     except Exception as e:
         print(f"SURFE SEARCH: Error: {e}")
         pd_add_note_to_deal(deal_id, f"⚠️ Surfe: Error during contact search: {e}")
+        mark_surfe_deal_processed(deal_id, "leadfeeder")
