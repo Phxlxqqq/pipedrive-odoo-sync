@@ -13,7 +13,7 @@ from config import (
     WEBHOOK_TOKEN, SURFE_WEBHOOK_TOKEN, DB_PATH,
     DOWNLOAD_STAGE_ID, LEADFEEDER_STAGE_ID, SURFE_ONLY_PIPELINES
 )
-from db import event_seen, get_enrichment, complete_enrichment, clear_surfe_processed_deals
+from db import event_seen, get_enrichment, complete_enrichment
 from odoo import odoo_login, upsert_org, upsert_person, upsert_deal, archive_deal_in_odoo
 from pipedrive import (
     pd_get, pd_val, pd_create_person, pd_update_person,
@@ -37,12 +37,8 @@ async def lifespan(_app):
     except Exception as e:
         print(f"STARTUP: Could not clear events table: {e}")
 
-    # Startup: Clear processed deals table (allows re-processing after restart)
-    try:
-        deleted = clear_surfe_processed_deals()
-        print(f"STARTUP: Cleared {deleted} old surfe processed deals")
-    except Exception as e:
-        print(f"STARTUP: Could not clear surfe processed deals: {e}")
+    # NOTE: surfe_processed_deals is NOT cleared on startup.
+    # Once a deal is claimed, it stays claimed permanently to prevent duplicates.
 
     yield
 
