@@ -143,34 +143,25 @@ def complete_enrichment(enrichment_id: str):
     con.close()
 
 
-# ---- Surfe Deal Processing (Deduplication) ----
-def surfe_deal_already_processed(deal_id: int, action_type: str) -> bool:
-    """Check if a deal was already processed for a Surfe action.
+# ---- Surfe Deal Processing (Atomic Deduplication) ----
+def claim_surfe_deal(deal_id: int, action_type: str) -> bool:
+    """Atomically claim a deal for Surfe processing.
 
-    action_type: 'download' or 'leadfeeder'
-    Returns True if already processed (skip), False if not yet processed.
-    """
-    con = get_con()
-    row = con.execute(
-        "SELECT 1 FROM surfe_processed_deals WHERE deal_id = ? AND action_type = ?",
-        (deal_id, action_type)
-    ).fetchone()
-    con.close()
-    return row is not None
+    Tries to INSERT a row. If it succeeds, this is the first webhook for this deal
+    and returns True (proceed). If it fails (duplicate), returns False (skip).
 
-
-def mark_surfe_deal_processed(deal_id: int, action_type: str):
-    """Mark a deal as processed for a Surfe action.
-
-    action_type: 'download' or 'leadfeeder'
+    This is atomic - no race condition possible between check and mark.
     """
     con = get_con()
     try:
         con.execute(
-            "INSERT OR IGNORE INTO surfe_processed_deals(deal_id, action_type) VALUES(?, ?)",
+            "INSERT INTO surfe_processed_deals(deal_id, action_type) VALUES(?, ?)",
             (deal_id, action_type)
         )
         con.commit()
+        return True  # Successfully claimed - proceed with processing
+    except sqlite3.IntegrityError:
+        return False  # Already claimed by another webhook - skip
     finally:
         con.close()
 

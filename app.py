@@ -191,6 +191,14 @@ async def surfe_webhook(req: Request):
         print(f"SURFE: Unknown enrichment {enrichment_id}")
         return {"ok": True, "unknown": True}
 
+    # Skip if already processed (duplicate callback protection)
+    if enrichment["status"] == "completed":
+        print(f"SURFE: Enrichment {enrichment_id} already completed, skip duplicate callback")
+        return {"ok": True, "deduped": True}
+
+    # Mark as completed immediately to prevent race conditions
+    complete_enrichment(enrichment_id)
+
     deal_id = enrichment["deal_id"]
     person_id = enrichment["person_id"]
     enrichment_type = enrichment["type"]
@@ -228,7 +236,6 @@ async def surfe_webhook(req: Request):
                 f"⚠️ Surfe: Contact found ({pending_person_data.get('name')}, {pending_person_data.get('job_title')}), "
                 f"but no email address found. Please research manually."
             )
-            complete_enrichment(enrichment_id)
             return {"ok": True, "no_email": True}
 
         try:
@@ -273,7 +280,6 @@ async def surfe_webhook(req: Request):
         except Exception as e:
             print(f"SURFE: Pipedrive update failed: {e}")
 
-    complete_enrichment(enrichment_id)
     return {"ok": True}
 
 
