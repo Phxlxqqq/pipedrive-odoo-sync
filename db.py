@@ -9,7 +9,7 @@ from config import DB_PATH
 
 def get_con():
     """Get database connection and ensure tables exist."""
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=10)
     con.execute("""
         CREATE TABLE IF NOT EXISTS mapping (
             object_type TEXT NOT NULL,
@@ -148,7 +148,7 @@ def claim_surfe_deal(deal_id: int, action_type: str) -> bool:
     """Atomically claim a deal for Surfe processing.
 
     Tries to INSERT a row. If it succeeds, this is the first webhook for this deal
-    and returns True (proceed). If it fails (duplicate), returns False (skip).
+    and returns True (proceed). If it fails (duplicate or locked), returns False (skip).
 
     This is atomic - no race condition possible between check and mark.
     """
@@ -160,8 +160,8 @@ def claim_surfe_deal(deal_id: int, action_type: str) -> bool:
         )
         con.commit()
         return True  # Successfully claimed - proceed with processing
-    except sqlite3.IntegrityError:
-        return False  # Already claimed by another webhook - skip
+    except (sqlite3.IntegrityError, sqlite3.OperationalError):
+        return False  # Already claimed or DB locked - skip either way
     finally:
         con.close()
 
