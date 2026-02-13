@@ -1,6 +1,6 @@
 """
-Pipedrive-Odoo-Surfe Sync Application
-FastAPI app with webhook handlers.
+Pipedrive Automation
+FastAPI app with webhook handlers for Odoo, Surfe, and Better Proposals.
 """
 import json
 import sqlite3
@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 from config import (
-    WEBHOOK_TOKEN, SURFE_WEBHOOK_TOKEN, DB_PATH,
+    WEBHOOK_TOKEN, SURFE_WEBHOOK_TOKEN, BP_WEBHOOK_TOKEN, DB_PATH,
     DOWNLOAD_STAGE_ID, LEADFEEDER_STAGE_ID, SURFE_ONLY_PIPELINES
 )
 from db import event_seen, get_enrichment, complete_enrichment
@@ -328,10 +328,28 @@ async def surfe_webhook(req: Request):
     return {"ok": True}
 
 
+# ---- Better Proposals Webhook ----
+@app.post("/webhooks/betterproposals")
+async def betterproposals_webhook(req: Request):
+    """Receive Better Proposals events (proposal signed, etc.)."""
+    if req.query_params.get("token") != BP_WEBHOOK_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    payload = await req.json()
+    print(f"BP WEBHOOK: {json.dumps(payload, indent=2, default=str)}")
+
+    # TODO: Implement when API token is available
+    # - Parse proposal data (products, prices, taxes)
+    # - Create/update Pipedrive products
+    # - Link products to deal
+
+    return {"ok": True}
+
+
 # ---- Health Endpoints ----
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "pipedrive-odoo-sync"}
+    return {"status": "ok", "service": "pipedrive-automation"}
 
 
 @app.get("/webhooks/surfe")

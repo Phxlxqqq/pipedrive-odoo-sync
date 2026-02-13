@@ -1,10 +1,10 @@
 services:
-  sync:
+  app:
     build: .
-    container_name: pipedrive-odoo-sync
+    container_name: pipedrive-automation
     working_dir: /app
     env_file:
-      - /opt/pipedrive-odoo-sync/.env
+      - /opt/pipedrive-automation/.env
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped

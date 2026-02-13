@@ -1,6 +1,6 @@
 """
-Configuration and constants for Pipedrive-Odoo-Surfe sync.
-All environment variables and mappings are centralized here.
+Configuration and constants for Pipedrive Automation.
+Integrations: Odoo, Surfe, Better Proposals.
 """
 import os
 from dotenv import load_dotenv
@@ -95,3 +95,8 @@ OWNER_MAP = {
 
 # ---- Pipedrive custom field keys ----
 PD_LANG_FIELD_KEY = "0a6493b05167a35971de14baa3b6e2b0175c11a7"
+
+# ---- Better Proposals API ----
+BP_API_KEY = os.getenv("BP_API_KEY")
+BP_BASE = "https://api.betterproposals.io"
+BP_WEBHOOK_TOKEN = os.getenv("BP_WEBHOOK_TOKEN")
