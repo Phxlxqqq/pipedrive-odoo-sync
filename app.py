@@ -4,6 +4,7 @@ FastAPI app with webhook handlers.
 """
 import json
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
@@ -21,12 +22,17 @@ from pipedrive import (
 )
 from surfe import handle_download_stage, handle_leadfeeder_stage
 
+# ---- In-Memory Deduplication (process-level, guaranteed atomic) ----
+_lock = threading.Lock()
+_processed_surfe_deals = set()      # (deal_id, action_type) - for Pipedrive webhooks
+_processed_enrichments = set()       # enrichment_id - for Surfe webhook callbacks
+_deals_with_person_created = set()   # deal_id - final guard: person already created
+
 
 # ---- App Lifecycle ----
 @asynccontextmanager
 async def lifespan(_app):
     """Lifespan handler: runs on startup and shutdown."""
-    # Startup: Clear the events deduplication table
     try:
         con = sqlite3.connect(DB_PATH)
         con.execute("DELETE FROM events")
@@ -36,9 +42,6 @@ async def lifespan(_app):
         print(f"STARTUP: Cleared {deleted} old events from deduplication table")
     except Exception as e:
         print(f"STARTUP: Could not clear events table: {e}")
-
-    # NOTE: surfe_processed_deals is NOT cleared on startup.
-    # Once a deal is claimed, it stays claimed permanently to prevent duplicates.
 
     yield
 
@@ -103,11 +106,9 @@ async def pipedrive_webhook(req: Request):
                     print(f"SURFE ONLY: Pipeline {pipeline_id} - skipping Odoo sync")
 
                 if stage_id == DOWNLOAD_STAGE_ID:
-                    print(f"SURFE TRIGGER: Download stage {DOWNLOAD_STAGE_ID} detected for deal {deal_id}")
-                    handle_download_stage(deal)
+                    _try_handle_download(deal, deal_id)
                 elif stage_id == LEADFEEDER_STAGE_ID:
-                    print(f"SURFE TRIGGER: Stage {LEADFEEDER_STAGE_ID} (Person Search) detected for deal {deal_id}")
-                    handle_leadfeeder_stage(deal)
+                    _try_handle_leadfeeder(deal, deal_id)
                 else:
                     print(f"SURFE CHECK: Stage {stage_id} is not a Surfe trigger stage (37 or 68)")
             except Exception as e:
@@ -127,15 +128,13 @@ async def pipedrive_webhook(req: Request):
 
                     if stage_id == LEADFEEDER_STAGE_ID:
                         if not person_id:
-                            print(f"SURFE UPDATE: Stage 68 deal {deal_id} has no person, running person search")
-                            handle_leadfeeder_stage(deal)
+                            _try_handle_leadfeeder(deal, deal_id)
                         else:
                             print(f"SURFE UPDATE: Stage 68 deal {deal_id} already has person {person_id}, skip")
 
                     elif stage_id == DOWNLOAD_STAGE_ID:
                         if person_id:
-                            print(f"SURFE UPDATE: Stage 37 deal {deal_id} has person {person_id}, running enrichment")
-                            handle_download_stage(deal)
+                            _try_handle_download(deal, deal_id)
                         else:
                             print(f"SURFE UPDATE: Stage 37 deal {deal_id} has no person, skip (Download requires person)")
 
@@ -150,6 +149,30 @@ async def pipedrive_webhook(req: Request):
         return {"ok": True, "ignored": True}
 
     return {"ok": True}
+
+
+def _try_handle_download(deal: dict, deal_id: int):
+    """Call handle_download_stage with in-memory dedup guard."""
+    with _lock:
+        key = (deal_id, "download")
+        if key in _processed_surfe_deals:
+            print(f"DEDUP: Deal {deal_id} download already triggered, skip")
+            return
+        _processed_surfe_deals.add(key)
+    print(f"SURFE TRIGGER: Download stage {DOWNLOAD_STAGE_ID} detected for deal {deal_id}")
+    handle_download_stage(deal)
+
+
+def _try_handle_leadfeeder(deal: dict, deal_id: int):
+    """Call handle_leadfeeder_stage with in-memory dedup guard."""
+    with _lock:
+        key = (deal_id, "leadfeeder")
+        if key in _processed_surfe_deals:
+            print(f"DEDUP: Deal {deal_id} leadfeeder already triggered, skip")
+            return
+        _processed_surfe_deals.add(key)
+    print(f"SURFE TRIGGER: Stage {LEADFEEDER_STAGE_ID} (Person Search) detected for deal {deal_id}")
+    handle_leadfeeder_stage(deal)
 
 
 # ---- Surfe Webhook ----
@@ -171,6 +194,13 @@ async def surfe_webhook(req: Request):
     data = payload.get("data", {})
     enrichment_id = data.get("enrichmentID")
 
+    # ---- DEDUP LAYER 1: In-memory enrichment lock ----
+    with _lock:
+        if enrichment_id in _processed_enrichments:
+            print(f"SURFE DEDUP: Enrichment {enrichment_id} already processed (in-memory), skip")
+            return {"ok": True, "deduped": True}
+        _processed_enrichments.add(enrichment_id)
+
     person_data = data.get("person")
     if not person_data:
         people_results = data.get("people", [])
@@ -179,7 +209,6 @@ async def surfe_webhook(req: Request):
 
     if not person_data:
         print(f"SURFE: No person data in enrichment result {enrichment_id}")
-        print(f"SURFE: Available data keys: {list(data.keys())}")
         return {"ok": True, "no_results": True}
 
     enrichment = get_enrichment(enrichment_id)
@@ -187,12 +216,11 @@ async def surfe_webhook(req: Request):
         print(f"SURFE: Unknown enrichment {enrichment_id}")
         return {"ok": True, "unknown": True}
 
-    # Skip if already processed (duplicate callback protection)
+    # ---- DEDUP LAYER 2: DB status check ----
     if enrichment["status"] == "completed":
-        print(f"SURFE: Enrichment {enrichment_id} already completed, skip duplicate callback")
+        print(f"SURFE DEDUP: Enrichment {enrichment_id} already completed (DB), skip")
         return {"ok": True, "deduped": True}
 
-    # Mark as completed immediately to prevent race conditions
     complete_enrichment(enrichment_id)
 
     deal_id = enrichment["deal_id"]
@@ -234,6 +262,23 @@ async def surfe_webhook(req: Request):
             )
             return {"ok": True, "no_email": True}
 
+        # ---- DEDUP LAYER 3: Check if deal already has a person (Pipedrive API) ----
+        with _lock:
+            if deal_id in _deals_with_person_created:
+                print(f"SURFE DEDUP: Person already created for deal {deal_id} (in-memory), skip")
+                return {"ok": True, "deduped": True}
+
+        try:
+            deal_check = pd_get(f"/deals/{deal_id}")
+            existing_person = pd_val(deal_check.get("person_id"))
+            if existing_person:
+                print(f"SURFE DEDUP: Deal {deal_id} already has person {existing_person} (API check), skip")
+                with _lock:
+                    _deals_with_person_created.add(deal_id)
+                return {"ok": True, "already_has_person": True}
+        except Exception as e:
+            print(f"SURFE: Deal check failed: {e}, proceeding with person creation")
+
         try:
             new_person = pd_create_person(
                 name=pending_person_data.get("name"),
@@ -246,6 +291,10 @@ async def surfe_webhook(req: Request):
             person_id = new_person.get("id")
 
             pd_link_person_to_deal(deal_id, person_id)
+
+            # Mark deal as having a person created
+            with _lock:
+                _deals_with_person_created.add(deal_id)
 
             print(f"SURFE: Created person {person_id} ({pending_person_data.get('name')}) with email {email} and linked to deal {deal_id}")
 
